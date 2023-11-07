@@ -61,7 +61,8 @@ var defaultAttributes = map[string]interface{}{
 
 func resourceRelease() *schema.Resource {
 	return &schema.Resource{
-		CreateContext: resourceReleaseCreate,
+		// CreateContext: resourceReleaseCreate,
+		CreateContext: resourceReleaseWithCreate,
 		ReadContext:   resourceReleaseRead,
 		DeleteContext: resourceReleaseDelete,
 		UpdateContext: resourceReleaseUpdate,
