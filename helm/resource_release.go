@@ -32,6 +32,7 @@ import (
 
 // errReleaseNotFound is the error when a Helm release is not found
 var errReleaseNotFound = errors.New("release not found")
+var errPending = errors.New("another operation (install/upgrade/rollback) is in progress")
 
 // defaultAttributes release attribute values
 var defaultAttributes = map[string]interface{}{
@@ -953,6 +954,17 @@ func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta int
 				return diag.FromErr(err)
 			} else {
 				debug("%s Client run err:%s, retry until: %d", name, err, i)
+				// 如果是pending 卡住,直接删除重启
+				if errPending.Error() == err.Error() {
+					uninstall := action.NewUninstall(actionConfig)
+					uninstall.Wait = true
+					uninstall.DisableHooks = false
+					uninstall.Timeout = client.Timeout
+					_, err := uninstall.Run(name)
+					if err != nil {
+						return diag.FromErr(err)
+					}
+				}
 				time.Sleep(1 * time.Second)
 				continue
 			}
