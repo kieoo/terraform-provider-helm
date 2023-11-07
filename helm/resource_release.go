@@ -37,6 +37,7 @@ var errReleaseNotFound = errors.New("release not found")
 var defaultAttributes = map[string]interface{}{
 	"verify":                     false,
 	"timeout":                    300,
+	"retry":                      0,
 	"wait":                       true,
 	"wait_for_jobs":              false,
 	"disable_webhooks":           false,
@@ -237,6 +238,12 @@ func resourceRelease() *schema.Resource {
 				Optional:    true,
 				Default:     defaultAttributes["timeout"],
 				Description: "Time in seconds to wait for any individual kubernetes operation.",
+			},
+			"retry": {
+				Type:        schema.TypeInt,
+				Optional:    true,
+				Default:     defaultAttributes["retry"],
+				Description: "Retry times for any helm operation if needed.",
 			},
 			"disable_webhooks": {
 				Type:        schema.TypeBool,
@@ -536,6 +543,157 @@ func checkChartDependencies(d resourceGetter, c *chart.Chart, path string, m *Me
 	return false, nil
 }
 
+func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	logID := fmt.Sprintf("[resourceReleaseCreate: %s]", d.Get("name").(string))
+	debug("%s Started", logID)
+
+	m := meta.(*Meta)
+	n := d.Get("namespace").(string)
+
+	debug("%s Getting helm configuration", logID)
+	actionConfig, err := m.GetHelmConfiguration(n)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	err = OCIRegistryLogin(actionConfig, d, m)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	client := action.NewUpgrade(actionConfig)
+
+	cpo, chartName, err := chartPathOptions(d, m, &client.ChartPathOptions)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	debug("%s Getting chart", logID)
+	c, path, err := getChart(d, m, chartName, cpo)
+	if err != nil {
+		return diag.FromErr(fmt.Errorf("could not download chart: %v", err))
+	}
+
+	// check and update the chart's dependencies if needed
+	updated, err := checkChartDependencies(d, c, path, m)
+	if err != nil {
+		return diag.FromErr(err)
+	} else if updated {
+		// load the chart again if its dependencies have been updated
+		c, err = loader.Load(path)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+
+	debug("%s Preparing for installation", logID)
+	values, err := getValues(d)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	err = isChartInstallable(c)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	// client.ClientOnly = false
+	client.Install = true
+	client.DryRun = false
+	client.DisableHooks = d.Get("disable_webhooks").(bool)
+	client.Wait = d.Get("wait").(bool)
+	client.WaitForJobs = d.Get("wait_for_jobs").(bool)
+	client.Devel = d.Get("devel").(bool)
+	client.DependencyUpdate = d.Get("dependency_update").(bool)
+	client.Timeout = time.Duration(d.Get("timeout").(int)) * time.Second
+	client.Namespace = d.Get("namespace").(string)
+	// client.ReleaseName = d.Get("name").(string)
+	//client.GenerateName = false
+	//client.NameTemplate = ""
+	//client.OutputDir = ""
+	client.Atomic = d.Get("atomic").(bool)
+	client.SkipCRDs = d.Get("skip_crds").(bool)
+	client.SubNotes = d.Get("render_subchart_notes").(bool)
+	client.DisableOpenAPIValidation = d.Get("disable_openapi_validation").(bool)
+	// client.Replace = d.Get("replace").(bool)
+	client.Description = d.Get("description").(string)
+	// client.CreateNamespace = d.Get("create_namespace").(bool)
+
+	if cmd := d.Get("postrender.0.binary_path").(string); cmd != "" {
+		av := d.Get("postrender.0.args")
+		var args []string
+		for _, arg := range av.([]interface{}) {
+			if arg == nil {
+				continue
+			}
+			args = append(args, arg.(string))
+		}
+
+		pr, err := postrender.NewExec(cmd, args...)
+
+		if err != nil {
+			return diag.FromErr(err)
+		}
+
+		client.PostRenderer = pr
+	}
+
+	debug("%s Installing chart", logID)
+
+	name := d.Get("name").(string)
+	retry := d.Get("retry").(int)
+	// 重试
+	var rel *release.Release
+	for i := retry; i >= 0; i-- {
+		rel, err = client.Run(name, c, values)
+		if err != nil && rel == nil {
+			if i == 0 {
+				return diag.FromErr(err)
+			} else {
+				debug("%s Client run err:%s, retry until: %d", logID, err, i)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+		} else {
+			break
+		}
+	}
+
+	if err != nil && rel != nil {
+		exists, existsErr := resourceReleaseExists(d, meta)
+
+		if existsErr != nil {
+			return diag.FromErr(existsErr)
+		}
+
+		if !exists {
+			return diag.FromErr(err)
+		}
+
+		debug("%s Release was created but returned an error", logID)
+
+		if err := setReleaseAttributes(d, rel, m); err != nil {
+			return diag.FromErr(err)
+		}
+
+		return diag.Diagnostics{
+			{
+				Severity: diag.Warning,
+				Summary:  fmt.Sprintf("Helm release %q was created but has a failed status. Use the `helm` command to investigate the error, correct it, then run Terraform again.", name),
+			},
+			{
+				Severity: diag.Error,
+				Summary:  err.Error(),
+			},
+		}
+
+	}
+
+	err = setReleaseAttributes(d, rel, m)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	return nil
+}
+
 func resourceReleaseCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	logID := fmt.Sprintf("[resourceReleaseCreate: %s]", d.Get("name").(string))
 	debug("%s Started", logID)
@@ -630,10 +788,27 @@ func resourceReleaseCreate(ctx context.Context, d *schema.ResourceData, meta int
 
 	debug("%s Installing chart", logID)
 
-	rel, err := client.Run(c, values)
-
-	if err != nil && rel == nil {
-		return diag.FromErr(err)
+	//rel, err := client.Run(c, values)
+	//
+	//if err != nil && rel == nil {
+	//	return diag.FromErr(err)
+	//}
+	retry := d.Get("retry").(int)
+	// 重试
+	var rel *release.Release
+	for i := retry; i >= 0; i-- {
+		rel, err = client.Run(c, values)
+		if err != nil && rel == nil {
+			if i == 0 {
+				return diag.FromErr(err)
+			} else {
+				debug("%s Client run err:%s, retry until: %d", logID, err, i)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+		} else {
+			break
+		}
 	}
 
 	if err != nil && rel != nil {
@@ -760,10 +935,29 @@ func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta int
 	}
 
 	name := d.Get("name").(string)
-	r, err := client.Run(name, c, values)
-	if err != nil {
-		d.Partial(true)
-		return diag.FromErr(err)
+	//r, err := client.Run(name, c, values)
+	//if err != nil {
+	//	d.Partial(true)
+	//	return diag.FromErr(err)
+	//}
+
+	retry := d.Get("retry").(int)
+	// 重试
+	var r *release.Release
+	for i := retry; i >= 0; i-- {
+		r, err = client.Run(name, c, values)
+		if err != nil && r == nil {
+			if i == 0 {
+				d.Partial(true)
+				return diag.FromErr(err)
+			} else {
+				debug("%s Client run err:%s, retry until: %d", name, err, i)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+		} else {
+			break
+		}
 	}
 
 	err = setReleaseAttributes(d, r, m)
