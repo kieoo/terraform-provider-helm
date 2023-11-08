@@ -197,7 +197,7 @@ func newKubeConfig(configData *schema.ResourceData, namespace *string) (*KubeCon
 
 	// time wait
 	// overrides.Timeout = strconv.Itoa(configData.Get("timeout").(int))
-	overrides.Timeout = "600s"
+	overrides.Timeout = "300s"
 
 	client := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, overrides)
 	if client == nil {
