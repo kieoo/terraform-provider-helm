@@ -1368,7 +1368,7 @@ func resourceReleaseExists(d *schema.ResourceData, meta interface{}) (bool, erro
 	times := retry
 	for {
 		_, err = getRelease(m, c, name)
-		if err == nil || times <= 0 {
+		if err == nil || err == errReleaseNotFound || times <= 0 {
 			break
 		}
 		debug("%s Get Release, failure:%s", logID, err)
