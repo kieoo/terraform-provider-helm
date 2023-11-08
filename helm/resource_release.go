@@ -646,7 +646,7 @@ func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta
 		rel, err = client.Run(name, c, values)
 		if err != nil && rel == nil {
 			if i == 0 {
-				return diag.FromErr(err)
+				return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", logID, err, retry))
 			} else {
 				debug("%s Client run err:%s, retry until: %d", logID, err, i)
 				time.Sleep(1 * time.Second)
@@ -800,7 +800,7 @@ func resourceReleaseCreate(ctx context.Context, d *schema.ResourceData, meta int
 		rel, err = client.Run(c, values)
 		if err != nil && rel == nil {
 			if i == 0 {
-				return diag.FromErr(err)
+				return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", logID, err, retry))
 			} else {
 				debug("%s Client run err:%s, retry until: %d", logID, err, i)
 				time.Sleep(1 * time.Second)
@@ -949,7 +949,8 @@ func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta int
 		if err != nil && r == nil {
 			if i == 0 {
 				d.Partial(true)
-				return diag.FromErr(err)
+				return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", name, err, retry))
+				// return diag.FromErr(err)
 			} else {
 				debug("%s Client run err:%s, retry until: %d", name, err, i)
 				time.Sleep(1 * time.Second)
