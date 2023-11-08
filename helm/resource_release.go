@@ -1363,17 +1363,18 @@ func resourceReleaseExists(d *schema.ResourceData, meta interface{}) (bool, erro
 	}
 
 	name := d.Get("name").(string)
-	// retry := d.Get("retry").(int)
+	retry := d.Get("retry").(int)
 
-	//for {
-	_, err = getRelease(m, c, name)
-	//if err == nil || retry <= 0 {
-	//	break
-	//}
-	//	debug("%s Get Release, failure:%s", logID, err)
-	//	retry -= 1
-	//	time.Sleep(time.Second)
-	//}
+	times := retry
+	for {
+		_, err = getRelease(m, c, name)
+		if err == nil || times <= 0 {
+			break
+		}
+		debug("%s Get Release, failure:%s", logID, err)
+		times -= 1
+		time.Sleep(time.Second)
+	}
 	debug("%s Done", logID)
 
 	if err == nil {
@@ -1384,7 +1385,7 @@ func resourceReleaseExists(d *schema.ResourceData, meta interface{}) (bool, erro
 		return false, nil
 	}
 
-	return false, err
+	return false, fmt.Errorf("%s Get Release, failure:%s", logID, err)
 }
 
 type resourceGetter interface {
