@@ -1385,7 +1385,7 @@ func resourceReleaseExists(d *schema.ResourceData, meta interface{}) (bool, erro
 		return false, nil
 	}
 
-	return false, fmt.Errorf("%s Get Release, failure:%s", logID, err)
+	return false, fmt.Errorf("%s Get Release, failure after %d, err:%s", logID, retry, err)
 }
 
 type resourceGetter interface {
