@@ -6,11 +6,6 @@ package helm
 import (
 	"bytes"
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
-	"sync"
-
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/mitchellh/go-homedir"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -18,6 +13,10 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
+	"log"
+	"os"
+	"path/filepath"
+	"sync"
 
 	apimachineryschema "k8s.io/apimachinery/pkg/runtime/schema"
 	memcached "k8s.io/client-go/discovery/cached/memory"
@@ -195,6 +194,10 @@ func newKubeConfig(configData *schema.ResourceData, namespace *string) (*KubeCon
 		overrides.Context.Namespace = *namespace
 	}
 	burstLimit := configData.Get("burst_limit").(int)
+
+	// time wait
+	// overrides.Timeout = strconv.Itoa(configData.Get("timeout").(int))
+	overrides.Timeout = "600s"
 
 	client := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, overrides)
 	if client == nil {
