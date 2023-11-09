@@ -1365,16 +1365,16 @@ func resourceReleaseExists(d *schema.ResourceData, meta interface{}) (bool, erro
 	name := d.Get("name").(string)
 	retry := d.Get("retry").(int)
 
-	//times := retry
-	//for {
-	_, err = getRelease(m, c, name)
-	//	if err == nil || err == errReleaseNotFound || times <= 0 {
-	//		break
-	//	}
-	//	debug("%s Get Release, failure:%s", logID, err)
-	//	times -= 1
-	//	time.Sleep(time.Second)
-	//}
+	times := retry
+	for {
+		_, err = getRelease(m, c, name)
+		if err == nil || err == errReleaseNotFound || times <= 0 {
+			break
+		}
+		debug("%s Get Release, failure:%s", logID, err)
+		times -= 1
+		time.Sleep(time.Second)
+	}
 	debug("%s Done", logID)
 
 	if err == nil {
