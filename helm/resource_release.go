@@ -32,6 +32,7 @@ import (
 
 // errReleaseNotFound is the error when a Helm release is not found
 var errReleaseNotFound = errors.New("release not found")
+var errPending = errors.New("another operation (install/upgrade/rollback) is in progress")
 
 // defaultAttributes release attribute values
 var defaultAttributes = map[string]interface{}{
@@ -61,7 +62,8 @@ var defaultAttributes = map[string]interface{}{
 
 func resourceRelease() *schema.Resource {
 	return &schema.Resource{
-		CreateContext: resourceReleaseCreate,
+		// CreateContext: resourceReleaseCreate,
+		CreateContext: resourceReleaseWithCreate,
 		ReadContext:   resourceReleaseRead,
 		DeleteContext: resourceReleaseDelete,
 		UpdateContext: resourceReleaseUpdate,
@@ -640,21 +642,21 @@ func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta
 
 	name := d.Get("name").(string)
 	retry := d.Get("retry").(int)
-	// 重试
+
 	var rel *release.Release
-	for i := retry; i >= 0; i-- {
+	// 重试
+	times := retry
+	for {
 		rel, err = client.Run(name, c, values)
-		if err != nil && rel == nil {
-			if i == 0 {
-				return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", logID, err, retry))
-			} else {
-				debug("%s Client run err:%s, retry until: %d", logID, err, i)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-		} else {
+		if err == nil || rel != nil || times <= 0 {
 			break
 		}
+		time.Sleep(1 * time.Second)
+		times -= 1
+	}
+
+	if err != nil && rel == nil {
+		return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", logID, err, retry))
 	}
 
 	if err != nil && rel != nil {
@@ -796,19 +798,18 @@ func resourceReleaseCreate(ctx context.Context, d *schema.ResourceData, meta int
 	retry := d.Get("retry").(int)
 	// 重试
 	var rel *release.Release
-	for i := retry; i >= 0; i-- {
+	times := retry
+	for {
 		rel, err = client.Run(c, values)
-		if err != nil && rel == nil {
-			if i == 0 {
-				return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", logID, err, retry))
-			} else {
-				debug("%s Client run err:%s, retry until: %d", logID, err, i)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-		} else {
+		if err == nil || rel != nil || times <= 0 {
 			break
 		}
+		time.Sleep(1 * time.Second)
+		times -= 1
+	}
+
+	if err != nil && rel == nil {
+		return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", logID, err, retry))
 	}
 
 	if err != nil && rel != nil {
@@ -889,6 +890,7 @@ func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta int
 		}
 	}
 
+	client.Install = true
 	client.Devel = d.Get("devel").(bool)
 	client.Namespace = d.Get("namespace").(string)
 	client.Timeout = time.Duration(d.Get("timeout").(int)) * time.Second
@@ -944,22 +946,58 @@ func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta int
 	retry := d.Get("retry").(int)
 	// 重试
 	var r *release.Release
-	for i := retry; i >= 0; i-- {
+	times := retry
+	for {
 		r, err = client.Run(name, c, values)
-		if err != nil && r == nil {
-			if i == 0 {
-				d.Partial(true)
-				return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", name, err, retry))
-				// return diag.FromErr(err)
-			} else {
-				debug("%s Client run err:%s, retry until: %d", name, err, i)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-		} else {
+		if err == nil || r != nil || times <= 0 {
 			break
 		}
+		// 如果是pending 卡住,直接删除重启
+		if errPending.Error() == err.Error() {
+			uninstall := action.NewUninstall(actionConfig)
+			uninstall.Wait = true
+			uninstall.DisableHooks = false
+			uninstall.Timeout = client.Timeout
+			_, err := uninstall.Run(name)
+			if err != nil {
+				return diag.FromErr(err)
+			}
+		}
+		time.Sleep(5 * time.Second)
+		times -= 1
 	}
+
+	if err != nil && r == nil {
+		return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", name, err, retry))
+	}
+
+	//for i := retry; i >= 0; i-- {
+	//	r, err = client.Run(name, c, values)
+	//	if err != nil && r == nil {
+	//		if i == 0 {
+	//			d.Partial(true)
+	//			return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", name, err, retry))
+	//			// return diag.FromErr(err)
+	//		} else {
+	//			debug("%s Client run err:%s, retry until: %d", name, err, i)
+	//			// 如果是pending 卡住,直接删除重启
+	//			if errPending.Error() == err.Error() {
+	//				uninstall := action.NewUninstall(actionConfig)
+	//				uninstall.Wait = true
+	//				uninstall.DisableHooks = false
+	//				uninstall.Timeout = client.Timeout
+	//				_, err := uninstall.Run(name)
+	//				if err != nil {
+	//					return diag.FromErr(err)
+	//				}
+	//			}
+	//			time.Sleep(1 * time.Second)
+	//			continue
+	//		}
+	//	} else {
+	//		break
+	//	}
+	//}
 
 	err = setReleaseAttributes(d, r, m)
 	if err != nil {
@@ -1325,8 +1363,18 @@ func resourceReleaseExists(d *schema.ResourceData, meta interface{}) (bool, erro
 	}
 
 	name := d.Get("name").(string)
-	_, err = getRelease(m, c, name)
+	retry := d.Get("retry").(int)
 
+	times := retry
+	for {
+		_, err = getRelease(m, c, name)
+		if err == nil || err == errReleaseNotFound || times <= 0 {
+			break
+		}
+		debug("%s Get Release, failure:%s", logID, err)
+		times -= 1
+		time.Sleep(time.Second)
+	}
 	debug("%s Done", logID)
 
 	if err == nil {
@@ -1337,7 +1385,7 @@ func resourceReleaseExists(d *schema.ResourceData, meta interface{}) (bool, erro
 		return false, nil
 	}
 
-	return false, err
+	return false, fmt.Errorf("%s Get Release, failure after %d, err:%s", logID, retry, err)
 }
 
 type resourceGetter interface {
