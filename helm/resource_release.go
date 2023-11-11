@@ -654,7 +654,7 @@ func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta
 		// install
 		rel, err = client.Run(c, values)
 		// update
-		if err.Error() == driver.ErrReleaseExists.Error() {
+		if err != nil && err.Error() == driver.ErrReleaseExists.Error() {
 			update := action.NewUpgrade(actionConfig)
 			update.Devel = d.Get("devel").(bool)
 			update.Namespace = d.Get("namespace").(string)
@@ -978,6 +978,10 @@ func resourceReleaseWithUpdate(ctx context.Context, d *schema.ResourceData, meta
 	for {
 		r, err = client.Run(name, c, values)
 
+		if err == nil || r != nil || times <= 0 {
+			break
+		}
+
 		// 如果是pending 卡住,直接删除重启
 		if errPending.Error() == err.Error() {
 			uninstall := action.NewUninstall(actionConfig)
@@ -1015,10 +1019,6 @@ func resourceReleaseWithUpdate(ctx context.Context, d *schema.ResourceData, meta
 			install.CreateNamespace = d.Get("create_namespace").(bool)
 
 			r, err = install.Run(c, values)
-		}
-
-		if err == nil || r != nil || times <= 0 {
-			break
 		}
 
 		time.Sleep(5 * time.Second)
