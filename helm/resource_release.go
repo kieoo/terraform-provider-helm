@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"helm.sh/helm/v3/pkg/storage/driver"
 	"log"
 	"net/url"
 	"os"
@@ -66,7 +67,8 @@ func resourceRelease() *schema.Resource {
 		CreateContext: resourceReleaseWithCreate,
 		ReadContext:   resourceReleaseRead,
 		DeleteContext: resourceReleaseDelete,
-		UpdateContext: resourceReleaseUpdate,
+		// UpdateContext: resourceReleaseUpdate,
+		UpdateContext: resourceReleaseWithUpdate,
 		Importer: &schema.ResourceImporter{
 			StateContext: resourceHelmReleaseImportState,
 		},
@@ -561,7 +563,7 @@ func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta
 	if err != nil {
 		return diag.FromErr(err)
 	}
-	client := action.NewUpgrade(actionConfig)
+	client := action.NewInstall(actionConfig)
 
 	cpo, chartName, err := chartPathOptions(d, m, &client.ChartPathOptions)
 	if err != nil {
@@ -597,8 +599,7 @@ func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta
 		return diag.FromErr(err)
 	}
 
-	// client.ClientOnly = false
-	client.Install = true
+	client.ClientOnly = false
 	client.DryRun = false
 	client.DisableHooks = d.Get("disable_webhooks").(bool)
 	client.Wait = d.Get("wait").(bool)
@@ -607,17 +608,17 @@ func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta
 	client.DependencyUpdate = d.Get("dependency_update").(bool)
 	client.Timeout = time.Duration(d.Get("timeout").(int)) * time.Second
 	client.Namespace = d.Get("namespace").(string)
-	// client.ReleaseName = d.Get("name").(string)
-	//client.GenerateName = false
-	//client.NameTemplate = ""
-	//client.OutputDir = ""
+	client.ReleaseName = d.Get("name").(string)
+	client.GenerateName = false
+	client.NameTemplate = ""
+	client.OutputDir = ""
 	client.Atomic = d.Get("atomic").(bool)
 	client.SkipCRDs = d.Get("skip_crds").(bool)
 	client.SubNotes = d.Get("render_subchart_notes").(bool)
 	client.DisableOpenAPIValidation = d.Get("disable_openapi_validation").(bool)
-	// client.Replace = d.Get("replace").(bool)
+	client.Replace = d.Get("replace").(bool)
 	client.Description = d.Get("description").(string)
-	// client.CreateNamespace = d.Get("create_namespace").(bool)
+	client.CreateNamespace = d.Get("create_namespace").(bool)
 
 	if cmd := d.Get("postrender.0.binary_path").(string); cmd != "" {
 		av := d.Get("postrender.0.args")
@@ -640,14 +641,42 @@ func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta
 
 	debug("%s Installing chart", logID)
 
-	name := d.Get("name").(string)
+	//rel, err := client.Run(c, values)
+	//
+	//if err != nil && rel == nil {
+	//	return diag.FromErr(err)
+	//}
 	retry := d.Get("retry").(int)
-
-	var rel *release.Release
 	// 重试
+	var rel *release.Release
 	times := retry
 	for {
-		rel, err = client.Run(name, c, values)
+		// install
+		rel, err = client.Run(c, values)
+		// update
+		if err.Error() == driver.ErrReleaseExists.Error() {
+			update := action.NewUpgrade(actionConfig)
+			update.Devel = d.Get("devel").(bool)
+			update.Namespace = d.Get("namespace").(string)
+			update.Timeout = time.Duration(d.Get("timeout").(int)) * time.Second
+			update.Wait = d.Get("wait").(bool)
+			update.WaitForJobs = d.Get("wait_for_jobs").(bool)
+			update.DryRun = false
+			update.DisableHooks = d.Get("disable_webhooks").(bool)
+			update.Atomic = d.Get("atomic").(bool)
+			update.SkipCRDs = d.Get("skip_crds").(bool)
+			update.SubNotes = d.Get("render_subchart_notes").(bool)
+			update.DisableOpenAPIValidation = d.Get("disable_openapi_validation").(bool)
+			update.Force = d.Get("force_update").(bool)
+			update.ResetValues = d.Get("reset_values").(bool)
+			update.ReuseValues = d.Get("reuse_values").(bool)
+			update.Recreate = d.Get("recreate_pods").(bool)
+			update.MaxHistory = d.Get("max_history").(int)
+			update.CleanupOnFail = d.Get("cleanup_on_fail").(bool)
+			update.Description = d.Get("description").(string)
+
+			rel, err = update.Run(client.ReleaseName, c, values)
+		}
 		if err == nil || rel != nil || times <= 0 {
 			break
 		}
@@ -679,7 +708,7 @@ func resourceReleaseWithCreate(ctx context.Context, d *schema.ResourceData, meta
 		return diag.Diagnostics{
 			{
 				Severity: diag.Warning,
-				Summary:  fmt.Sprintf("Helm release %q was created but has a failed status. Use the `helm` command to investigate the error, correct it, then run Terraform again.", name),
+				Summary:  fmt.Sprintf("Helm release %q was created but has a failed status. Use the `helm` command to investigate the error, correct it, then run Terraform again.", client.ReleaseName),
 			},
 			{
 				Severity: diag.Error,
@@ -849,6 +878,164 @@ func resourceReleaseCreate(ctx context.Context, d *schema.ResourceData, meta int
 	return nil
 }
 
+func resourceReleaseWithUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	m := meta.(*Meta)
+	n := d.Get("namespace").(string)
+	actionConfig, err := m.GetHelmConfiguration(n)
+	if err != nil {
+		d.Partial(true)
+		return diag.FromErr(err)
+	}
+	err = OCIRegistryLogin(actionConfig, d, m)
+	if err != nil {
+		d.Partial(true)
+		return diag.FromErr(err)
+	}
+	client := action.NewUpgrade(actionConfig)
+
+	cpo, chartName, err := chartPathOptions(d, m, &client.ChartPathOptions)
+	if err != nil {
+		d.Partial(true)
+		return diag.FromErr(err)
+	}
+
+	c, path, err := getChart(d, m, chartName, cpo)
+	if err != nil {
+		d.Partial(true)
+		return diag.FromErr(err)
+	}
+
+	// check and update the chart's dependencies if needed
+	updated, err := checkChartDependencies(d, c, path, m)
+	if err != nil {
+		d.Partial(true)
+		return diag.FromErr(err)
+	} else if updated {
+		// load the chart again if its dependencies have been updated
+		c, err = loader.Load(path)
+		if err != nil {
+			d.Partial(true)
+			return diag.FromErr(err)
+		}
+	}
+
+	client.Devel = d.Get("devel").(bool)
+	client.Namespace = d.Get("namespace").(string)
+	client.Timeout = time.Duration(d.Get("timeout").(int)) * time.Second
+	client.Wait = d.Get("wait").(bool)
+	client.WaitForJobs = d.Get("wait_for_jobs").(bool)
+	client.DryRun = false
+	client.DisableHooks = d.Get("disable_webhooks").(bool)
+	client.Atomic = d.Get("atomic").(bool)
+	client.SkipCRDs = d.Get("skip_crds").(bool)
+	client.SubNotes = d.Get("render_subchart_notes").(bool)
+	client.DisableOpenAPIValidation = d.Get("disable_openapi_validation").(bool)
+	client.Force = d.Get("force_update").(bool)
+	client.ResetValues = d.Get("reset_values").(bool)
+	client.ReuseValues = d.Get("reuse_values").(bool)
+	client.Recreate = d.Get("recreate_pods").(bool)
+	client.MaxHistory = d.Get("max_history").(int)
+	client.CleanupOnFail = d.Get("cleanup_on_fail").(bool)
+	client.Description = d.Get("description").(string)
+
+	if cmd := d.Get("postrender.0.binary_path").(string); cmd != "" {
+		av := d.Get("postrender.0.args")
+		var args []string
+		for _, arg := range av.([]interface{}) {
+			if arg == nil {
+				continue
+			}
+			args = append(args, arg.(string))
+		}
+
+		pr, err := postrender.NewExec(cmd, args...)
+
+		if err != nil {
+			d.Partial(true)
+			return diag.FromErr(err)
+		}
+
+		client.PostRenderer = pr
+	}
+
+	values, err := getValues(d)
+	if err != nil {
+		d.Partial(true)
+		return diag.FromErr(err)
+	}
+
+	name := d.Get("name").(string)
+	//r, err := client.Run(name, c, values)
+	//if err != nil {
+	//	d.Partial(true)
+	//	return diag.FromErr(err)
+	//}
+
+	retry := d.Get("retry").(int)
+	// 重试
+	var r *release.Release
+	times := retry
+	for {
+		r, err = client.Run(name, c, values)
+
+		// 如果是pending 卡住,直接删除重启
+		if errPending.Error() == err.Error() {
+			uninstall := action.NewUninstall(actionConfig)
+			uninstall.Wait = true
+			uninstall.DisableHooks = false
+			uninstall.Timeout = client.Timeout
+			_, err := uninstall.Run(name)
+			if err != nil {
+				return diag.FromErr(err)
+			}
+			err = driver.ErrNoDeployedReleases
+		}
+
+		if err.Error() == driver.ErrNoDeployedReleases.Error() || err.Error() == driver.ErrReleaseNotFound.Error() {
+			install := action.NewInstall(actionConfig)
+			install.ClientOnly = false
+			install.DryRun = false
+			install.DisableHooks = d.Get("disable_webhooks").(bool)
+			install.Wait = d.Get("wait").(bool)
+			install.WaitForJobs = d.Get("wait_for_jobs").(bool)
+			install.Devel = d.Get("devel").(bool)
+			install.DependencyUpdate = d.Get("dependency_update").(bool)
+			install.Timeout = time.Duration(d.Get("timeout").(int)) * time.Second
+			install.Namespace = d.Get("namespace").(string)
+			install.ReleaseName = d.Get("name").(string)
+			install.GenerateName = false
+			install.NameTemplate = ""
+			install.OutputDir = ""
+			install.Atomic = d.Get("atomic").(bool)
+			install.SkipCRDs = d.Get("skip_crds").(bool)
+			install.SubNotes = d.Get("render_subchart_notes").(bool)
+			install.DisableOpenAPIValidation = d.Get("disable_openapi_validation").(bool)
+			install.Replace = d.Get("replace").(bool)
+			install.Description = d.Get("description").(string)
+			install.CreateNamespace = d.Get("create_namespace").(bool)
+
+			r, err = install.Run(c, values)
+		}
+
+		if err == nil || r != nil || times <= 0 {
+			break
+		}
+
+		time.Sleep(5 * time.Second)
+		times -= 1
+	}
+
+	if err != nil && r == nil {
+		return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", name, err, retry))
+	}
+
+	err = setReleaseAttributes(d, r, m)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	return nil
+}
+
 func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	m := meta.(*Meta)
 	n := d.Get("namespace").(string)
@@ -890,7 +1077,6 @@ func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta int
 		}
 	}
 
-	client.Install = true
 	client.Devel = d.Get("devel").(bool)
 	client.Namespace = d.Get("namespace").(string)
 	client.Timeout = time.Duration(d.Get("timeout").(int)) * time.Second
@@ -952,17 +1138,6 @@ func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta int
 		if err == nil || r != nil || times <= 0 {
 			break
 		}
-		// 如果是pending 卡住,直接删除重启
-		if errPending.Error() == err.Error() {
-			uninstall := action.NewUninstall(actionConfig)
-			uninstall.Wait = true
-			uninstall.DisableHooks = false
-			uninstall.Timeout = client.Timeout
-			_, err := uninstall.Run(name)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
 		time.Sleep(5 * time.Second)
 		times -= 1
 	}
@@ -970,34 +1145,6 @@ func resourceReleaseUpdate(ctx context.Context, d *schema.ResourceData, meta int
 	if err != nil && r == nil {
 		return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", name, err, retry))
 	}
-
-	//for i := retry; i >= 0; i-- {
-	//	r, err = client.Run(name, c, values)
-	//	if err != nil && r == nil {
-	//		if i == 0 {
-	//			d.Partial(true)
-	//			return diag.FromErr(fmt.Errorf("%s Client run err:%s, retry after: %d", name, err, retry))
-	//			// return diag.FromErr(err)
-	//		} else {
-	//			debug("%s Client run err:%s, retry until: %d", name, err, i)
-	//			// 如果是pending 卡住,直接删除重启
-	//			if errPending.Error() == err.Error() {
-	//				uninstall := action.NewUninstall(actionConfig)
-	//				uninstall.Wait = true
-	//				uninstall.DisableHooks = false
-	//				uninstall.Timeout = client.Timeout
-	//				_, err := uninstall.Run(name)
-	//				if err != nil {
-	//					return diag.FromErr(err)
-	//				}
-	//			}
-	//			time.Sleep(1 * time.Second)
-	//			continue
-	//		}
-	//	} else {
-	//		break
-	//	}
-	//}
 
 	err = setReleaseAttributes(d, r, m)
 	if err != nil {
